@@ -110,6 +110,11 @@ class ShutdownScheduler(ctk.CTk):
         note = ctk.CTkLabel(frame, text="OBS: O comando do Windows pode precisar de privilégios de administrador.")
         note.pack(side="bottom", pady=(8, 0))
 
+        # Modo Simular (não executa shutdown)
+        self.simulate_var = tk.BooleanVar(value=False)
+        simulate_cb = ctk.CTkCheckBox(frame, text="Modo Simular (não executa shutdown)", variable=self.simulate_var)
+        simulate_cb.pack(pady=(6, 0))
+
         self.on_mode_change(self.mode_var.get())
 
         # Bindings de scroll para ajustar valores com o mouse
@@ -141,20 +146,20 @@ class ShutdownScheduler(ctk.CTk):
             if mode == "Horário (HH:MM)":
                 text = self.time_entry.get().strip()
                 if not text:
-                    messagebox.showerror("Erro", "Informe o horário no formato HH:MM")
+                    messagebox.showerror("Erro", "Informe o horário no formato HH:MM", parent=self)
                     return
                 seconds = self._seconds_until_time(text)
                 if seconds <= 0:
-                    messagebox.showerror("Erro", "Horario inválido ou igual ao atual")
+                    messagebox.showerror("Erro", "Horario inválido ou igual ao atual", parent=self)
                     return
             else:
                 text = self.value_entry.get().strip()
                 if not text:
-                    messagebox.showerror("Erro", "Informe um valor numérico")
+                    messagebox.showerror("Erro", "Informe um valor numérico", parent=self)
                     return
                 val = int(float(text))
                 if val < 0:
-                    messagebox.showerror("Erro", "Valor deve ser positivo")
+                    messagebox.showerror("Erro", "Valor deve ser positivo", parent=self)
                     return
                 if mode == "Segundos":
                     seconds = val
@@ -166,7 +171,7 @@ class ShutdownScheduler(ctk.CTk):
                     seconds = val
 
         except ValueError:
-            messagebox.showerror("Erro", "Valor inválido (digite apenas números ou HH:MM)")
+            messagebox.showerror("Erro", "Valor inválido (digite apenas números ou HH:MM)", parent=self)
             return
 
         # Atualizar label e executar comando
@@ -206,20 +211,58 @@ class ShutdownScheduler(ctk.CTk):
         delta = target - now
         return int(delta.total_seconds())
 
+    def _find_shutdown_exe(self) -> str:
+        """Tenta localizar o executável shutdown.exe de forma robusta.
+
+        Em builds 32-bit em Windows 64-bit, `System32` pode ser redirecionado. Tenta `Sysnative`,
+        depois `System32` e por fim retorna empty string para fallback ao nome simples.
+        """
+        windir = os.environ.get('WINDIR', r'C:\Windows')
+        candidates = [
+            os.path.join(windir, 'Sysnative', 'shutdown.exe'),
+            os.path.join(windir, 'System32', 'shutdown.exe'),
+            os.path.join(windir, 'System32', 'shutdown.com'),
+        ]
+        for p in candidates:
+            try:
+                if os.path.exists(p):
+                    return p
+            except Exception:
+                continue
+        return ""
+
     def _run_shutdown_command(self, seconds: int):
         # Executa o comando shutdown -s -t <seconds>
         try:
-            completed = subprocess.run(["shutdown", "-s", "-t", str(int(seconds))], capture_output=True, text=True)
-            if completed.returncode == 0:
-                messagebox.showinfo("Agendado", f"Desligamento agendado em {seconds} segundos.")
+            # Se estiver em modo simular, não executa o comando real
+            if getattr(self, 'simulate_var', None) is not None and self.simulate_var.get():
+                messagebox.showinfo("Simulação", f"Simulando desligamento em {seconds} segundos.", parent=self)
+                # criar objeto similar ao retorno de subprocess
+                completed = type('R', (), {'returncode': 0, 'stdout': '', 'stderr': ''})()
             else:
-                messagebox.showwarning("Comando retornou erro", f"O comando retornou código {completed.returncode}.\nSaída: {completed.stdout}\nErro: {completed.stderr}\nTente executar o programa como administrador se necessário.")
+                exe = self._find_shutdown_exe()
+                if exe:
+                    completed = subprocess.run([exe, "-s", "-t", str(int(seconds))], capture_output=True, text=True)
+                else:
+                    # fallback para chamada pelo nome (depende do PATH)
+                    completed = subprocess.run(["shutdown", "-s", "-t", str(int(seconds))], capture_output=True, text=True)
+
+            if completed.returncode == 0:
+                # Para simulação já mostramos mensagem acima; caso real, informar agendado
+                if not (getattr(self, 'simulate_var', None) is not None and self.simulate_var.get()):
+                    messagebox.showinfo("Agendado", f"Desligamento agendado em {seconds} segundos.", parent=self)
+            else:
+                messagebox.showwarning(
+                    "Comando retornou erro",
+                    f"O comando retornou código {completed.returncode}.\nSaída: {completed.stdout}\nErro: {completed.stderr}\nTente executar o programa como administrador se necessário.",
+                    parent=self,
+                )
 
         except FileNotFoundError:
-            messagebox.showerror("Erro", "Comando 'shutdown' não encontrado. Este script foi feito para Windows.")
+            messagebox.showerror("Erro", "Comando 'shutdown' não encontrado. Este script foi feito para Windows.", parent=self)
             return
         except Exception as e:
-            messagebox.showerror("Erro", f"Falha ao executar comando: {e}")
+            messagebox.showerror("Erro", f"Falha ao executar comando: {e}", parent=self)
             return
 
         # Iniciar contagem local (apenas visual)
@@ -256,13 +299,26 @@ class ShutdownScheduler(ctk.CTk):
 
     def on_cancel(self):
         try:
-            completed = subprocess.run(["shutdown", "-a"], capture_output=True, text=True)
-            if completed.returncode == 0:
-                messagebox.showinfo("Cancelado", "Solicitação de desligamento cancelada (shutdown -a).")
+            # Se estiver em modo simular, não executa o cancelamento real
+            if getattr(self, 'simulate_var', None) is not None and self.simulate_var.get():
+                messagebox.showinfo("Simulação", "Simulação de cancelamento executada.", parent=self)
             else:
-                messagebox.showwarning("Aviso", f"shutdown -a retornou código {completed.returncode}.\nSaída: {completed.stdout}\nErro: {completed.stderr}")
+                exe = self._find_shutdown_exe()
+                if exe:
+                    completed = subprocess.run([exe, "-a"], capture_output=True, text=True)
+                else:
+                    completed = subprocess.run(["shutdown", "-a"], capture_output=True, text=True)
+
+                if completed.returncode == 0:
+                    messagebox.showinfo("Cancelado", "Solicitação de desligamento cancelada (shutdown -a).", parent=self)
+                else:
+                    messagebox.showwarning(
+                        "Aviso",
+                        f"shutdown -a retornou código {completed.returncode}.\nSaída: {completed.stdout}\nErro: {completed.stderr}",
+                        parent=self,
+                    )
         except Exception as e:
-            messagebox.showerror("Erro", f"Falha ao executar 'shutdown -a': {e}")
+            messagebox.showerror("Erro", f"Falha ao executar 'shutdown -a': {e}", parent=self)
             return
 
         if self.countdown_job is not None:
@@ -362,13 +418,13 @@ class ShutdownScheduler(ctk.CTk):
                 _ = self._seconds_until_time(txt)
                 cfg['daily_time'] = txt
             except Exception:
-                messagebox.showerror("Erro", "Horário inválido. Use HH:MM antes de salvar.")
+                messagebox.showerror("Erro", "Horário inválido. Use HH:MM antes de salvar.", parent=self)
                 return
         else:
             cfg['daily_time'] = cfg.get('daily_time', '')
 
         self.save_config(cfg)
-        messagebox.showinfo("Salvo", "Configuração salva em config.json")
+        messagebox.showinfo("Salvo", "Configuração salva em config.json", parent=self)
         # atualizar estimativa visual
         self.update_converted_seconds()
 
@@ -411,7 +467,7 @@ class ShutdownScheduler(ctk.CTk):
             with open(self.config_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            messagebox.showerror("Erro", f"Falha ao salvar config: {e}")
+            messagebox.showerror("Erro", f"Falha ao salvar config: {e}", parent=self)
 
     def schedule_daily_if_enabled(self):
         try:
